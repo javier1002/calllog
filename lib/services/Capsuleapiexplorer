@@ -1,0 +1,158 @@
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+
+class CapsuleAPIExplorer {
+  static const _base = 'https://api.capsulecrm.com/api/v2';
+  static const _apiKey = 'svXuia0+HUmBBH/MTF1ghcnVBtQ/JML72vBlpHeBgmRMdZsEFU21FROWmXGoc/HU';
+
+  static Map<String, String> get _headers => {
+    'Authorization': 'Bearer $_apiKey',
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  };
+
+  /// Prueba GET en un endpoint
+  static Future<void> testGet(String endpoint) async {
+    try {
+      print('\n🔍 GET $endpoint');
+      final res = await http.get(
+        Uri.parse('$_base$endpoint'),
+        headers: _headers,
+      );
+      print('   Status: ${res.statusCode}');
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        print('   ✅ Response keys: ${data.keys.toList()}');
+      } else {
+        print('   ❌ ${res.body}');
+      }
+    } catch (e) {
+      print('   ❌ Exception: $e');
+    }
+  }
+
+  /// Prueba POST en un endpoint
+  static Future<void> testPost(String endpoint, Map<String, dynamic> payload) async {
+    try {
+      print('\n📤 POST $endpoint');
+      final body = jsonEncode(payload);
+      final res = await http.post(
+        Uri.parse('$_base$endpoint'),
+        headers: _headers,
+        body: body,
+      );
+      print('   Status: ${res.statusCode}');
+      print('   Response: ${res.body.substring(0, 200)}');
+    } catch (e) {
+      print('   ❌ Exception: $e');
+    }
+  }
+
+  /// Obtiene información del contacto para ver su estructura
+  static Future<void> inspectParty(int partyId) async {
+    try {
+      print('\n🔍 Inspeccionando party $partyId');
+      final res = await http.get(
+        Uri.parse('$_base/parties/$partyId'),
+        headers: _headers,
+      );
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        print('   ✅ Party structure:');
+
+        if (data['party'] != null) {
+          final party = data['party'];
+          print('   - id: ${party['id']}');
+          print('   - type: ${party['type']}');
+          print('   - name: ${party['name'] ?? party['firstName']} ${party['lastName'] ?? ''}');
+
+          // Buscar actividades anidadas
+          if (party['activities'] != null) {
+            print('   - activities: ${party['activities'].length} encontradas');
+          }
+
+          // Buscar milestones anidados
+          if (party['milestones'] != null) {
+            print('   - milestones: ${party['milestones'].length} encontradas');
+          }
+
+          print('   - Todas las keys: ${party.keys.toList()}');
+        }
+      }
+    } catch (e) {
+      print('   ❌ Exception: $e');
+    }
+  }
+
+  /// Explora todos los endpoints posibles
+  static Future<void> exploreAllEndpoints() async {
+    print('█' * 70);
+    print('EXPLORADOR DE ENDPOINTS CAPSULE CRM API');
+    print('█' * 70);
+
+    // Prueba endpoints comunes
+    final endpointsToTest = [
+      '/activities',
+      '/activities/',
+      '/activity',
+      '/notes',
+      '/logs',
+      '/timeline',
+      '/user',
+      '/users/me',
+      '/parties/284991886',
+      '/parties/284991886/timeline',
+      '/parties/284991886/notes',
+      '/parties/284991886/logs',
+      '/opportunities',
+      '/opportunities?limit=1',
+      '/milestones',
+    ];
+
+    for (final endpoint in endpointsToTest) {
+      await testGet(endpoint);
+    }
+
+    print('\n');
+    print('█' * 70);
+    print('PRUEBAS DE POST');
+    print('█' * 70);
+
+    // Prueba crear una nota (alternativa a actividad)
+    await testPost('/parties/284991886/notes', {
+      'text': 'Prueba desde Flutter'
+    });
+
+    // Prueba crear timeline entry
+    await testPost('/parties/284991886/timeline', {
+      'text': 'Llamada de prueba',
+      'type': 'call'
+    });
+
+    // Prueba crear log
+    await testPost('/parties/284991886/logs', {
+      'content': 'Test log',
+      'type': 'call'
+    });
+
+    print('\n');
+    print('█' * 70);
+    print('INSPECCIÓN DE PARTY');
+    print('█' * 70);
+
+    await inspectParty(284991886);
+
+    print('\n');
+    print('█' * 70);
+    print('✅ EXPLORACIÓN COMPLETADA');
+    print('█' * 70);
+  }
+}
+
+// En main.dart:
+// void main() async {
+//   WidgetsFlutterBinding.ensureInitialized();
+//   await CapsuleAPIExplorer.exploreAllEndpoints();
+//   runApp(const RegistroLlamadasApp());
+// }
