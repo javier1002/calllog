@@ -20,10 +20,24 @@ class AppTheme {
       brightness: Brightness.dark,
       colorScheme: colorScheme.copyWith(
         primary: primary,
-          error: danger,
+        error: danger,
       ),
       scaffoldBackgroundColor: background,
       fontFamily: 'Roboto',
+
+      // ← NUEVO: menú ⋮ con fondo oscuro y texto blanco
+      popupMenuTheme: PopupMenuThemeData(
+        color: surface,
+        surfaceTintColor: Colors.transparent,
+        textStyle: const TextStyle(
+          color: Colors.white,
+          fontSize: 15,
+        ),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+        ),
+      ),
+
       appBarTheme: const AppBarTheme(
         backgroundColor: background,
         elevation: 0,
