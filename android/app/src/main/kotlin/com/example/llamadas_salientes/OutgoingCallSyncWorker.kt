@@ -26,10 +26,11 @@ class OutgoingCallSyncWorker(
         private const val DATABASE_NAME = "registro_llamadas_salientes.db"
         private const val CAPSULE_BASE = "https://api.capsulecrm.com/api/v2"
 
-        // Lee la API key desde SharedPreferences (la guardamos desde Flutter)
         fun getApiKey(context: Context): String {
             val prefs = context.getSharedPreferences("capsule_prefs", Context.MODE_PRIVATE)
-            return prefs.getString("api_key", "") ?: ""
+            val fromPrefs = prefs.getString("api_key", "") ?: ""
+            if (fromPrefs.isNotEmpty()) return fromPrefs
+            return "ujfj8+XVhZZHA7FHlFqK+Mplc0HO8mEbXHYp59C177FbXS9fIt70x40jYoLu/4Y+"
         }
     }
 
@@ -43,9 +44,6 @@ class OutgoingCallSyncWorker(
 
         android.util.Log.d("CAPSULE_WORKER", "✅ Permisos OK, iniciando sync...")
 
-
-        if (!hasRequiredPermissions()) return Result.success()
-
         return try {
             val db = openDatabase()
             ensureSchema(db)
@@ -56,8 +54,8 @@ class OutgoingCallSyncWorker(
             val excludedRules = getExcludedRules(db)
             syncOutgoingCalls(db, excludedRules, from, now)
 
-            // Después de guardar en SQLite, sincroniza con Capsule
             val apiKey = getApiKey(applicationContext)
+            android.util.Log.d("CAPSULE_WORKER", "🔑 API key vacía: ${apiKey.isEmpty()}")
             if (apiKey.isNotEmpty()) {
                 syncToCapsule(db, apiKey)
             }
@@ -65,16 +63,18 @@ class OutgoingCallSyncWorker(
             db.close()
             Result.success()
         } catch (e: Exception) {
+            android.util.Log.e("CAPSULE_WORKER", "❌ Error en doWork: ${e.message}")
             Result.retry()
         }
     }
 
     private fun syncToCapsule(db: android.database.sqlite.SQLiteDatabase, apiKey: String) {
-        android.util.Log.d("CAPSULE_WORKER", "📤 syncToCapsule iniciado, apiKey vacía: ${apiKey.isEmpty()}")
+        android.util.Log.d("CAPSULE_WORKER", "📤 syncToCapsule iniciado")
+        var creadas = 0
+        var omitidas = 0
 
         val cursor = db.query(
-            "llamadas_salientes",
-            null,
+            "llamadas_salientes", null,
             "sincronizado = 0",
             null, null, null,
             "timestamp DESC"
@@ -96,14 +96,29 @@ class OutgoingCallSyncWorker(
                 val duracion = it.getInt(durIdx)
                 val estado = it.getString(estIdx) ?: ""
 
-                if (numero.isBlank()) continue
+                if (numero.isBlank()) { omitidas++; continue }
 
-                val partyId = findContactByPhone(numero, apiKey) ?: continue
-                val opportunityId = findManualCallOpportunity(partyId, apiKey) ?: continue
-                val ok = addCallToOpportunity(
-                    opportunityId, numero, fecha, hora, duracion, estado, apiKey
-                )
+                android.util.Log.d("CAPSULE_WORKER", "📱 Procesando: $numero")
 
+                val partyId = findContactByPhone(numero, apiKey)
+                if (partyId == null) { omitidas++; continue }
+
+// Busca oportunidad directa en la persona
+                var opportunityId = findManualCallOpportunity(partyId, numero, apiKey)
+
+// Si no, busca en su organización
+                if (opportunityId == null) {
+                    val orgId = getOrganisationId(partyId, apiKey)
+                    android.util.Log.d("CAPSULE_WORKER", "🏢 orgId para $partyId: $orgId")
+                    if (orgId != null) {
+                        opportunityId = findManualCallOpportunity(orgId, numero, apiKey)
+                    }
+                }
+
+                if (opportunityId == null) { omitidas++; continue }
+
+
+                val ok = addCallToOpportunity(opportunityId, numero, fecha, hora, duracion, estado, apiKey)
                 if (ok) {
                     db.update(
                         "llamadas_salientes",
@@ -111,9 +126,21 @@ class OutgoingCallSyncWorker(
                         "id = ?",
                         arrayOf(callId.toString())
                     )
+                    creadas++
+                    android.util.Log.d("CAPSULE_WORKER", "✅ Sincronizado: $numero")
+                } else {
+                    omitidas++
                 }
             }
         }
+
+        val prefs = applicationContext.getSharedPreferences("capsule_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putString(
+            "last_sync_result",
+            "🔄 Sync automático\n✅ Creadas: $creadas\n⛔ Omitidas: $omitidas"
+        ).apply()
+
+        android.util.Log.d("CAPSULE_WORKER", "🏁 Creadas: $creadas, Omitidas: $omitidas")
     }
 
     private fun last10Digits(phone: String): String {
@@ -122,42 +149,130 @@ class OutgoingCallSyncWorker(
     }
 
     private fun findContactByPhone(phoneNumber: String, apiKey: String): Int? {
-        val clean = last10Digits(phoneNumber)
-        val url = URL("$CAPSULE_BASE/parties/search?q=${clean}")
-        val conn = url.openConnection() as HttpURLConnection
-        conn.setRequestProperty("Authorization", "Bearer $apiKey")
-        conn.setRequestProperty("Accept", "application/json")
+        return try {
+            val clean = last10Digits(phoneNumber)
+            val url = URL("$CAPSULE_BASE/parties/search?q=$clean")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.connectTimeout = 15000
+            conn.readTimeout = 15000
+            conn.setRequestProperty("Authorization", "Bearer $apiKey")
+            conn.setRequestProperty("Accept", "application/json")
 
-        if (conn.responseCode != 200) return null
+            if (conn.responseCode != 200) return null
 
-        val body = conn.inputStream.bufferedReader().readText()
-        val parties = JSONObject(body).getJSONArray("parties")
+            val body = conn.inputStream.bufferedReader().readText()
+            val parties = JSONObject(body).getJSONArray("parties")
 
-        for (i in 0 until parties.length()) {
-            val party = parties.getJSONObject(i)
-            val phones = party.optJSONArray("phoneNumbers") ?: continue
-            for (j in 0 until phones.length()) {
-                val num = phones.getJSONObject(j).optString("number", "")
-                if (last10Digits(num) == clean && clean.isNotEmpty()) {
-                    return party.getInt("id")
+            // Recolecta TODOS los partyIds que tienen este número
+            val candidatos = mutableListOf<Int>()
+            for (i in 0 until parties.length()) {
+                val party = parties.getJSONObject(i)
+                val phones = party.optJSONArray("phoneNumbers") ?: continue
+                for (j in 0 until phones.length()) {
+                    val num = phones.getJSONObject(j).optString("number", "")
+                    if (last10Digits(num) == clean && clean.isNotEmpty()) {
+                        candidatos.add(party.getInt("id"))
+                        android.util.Log.d("CAPSULE_WORKER", "👤 Candidato: ${party.getInt("id")} - ${party.optString("firstName")} ${party.optString("lastName")} ${party.optString("name")}")
+                    }
                 }
             }
+
+            if (candidatos.isEmpty()) return null
+
+            // Devuelve el primero que tenga oportunidades
+            for (partyId in candidatos) {
+                val hasOpp = hasOpportunity(partyId, apiKey)
+                android.util.Log.d("CAPSULE_WORKER", "🔍 partyId $partyId tiene oportunidad: $hasOpp")
+                if (hasOpp) return partyId
+            }
+
+            // Si ninguno tiene oportunidad directa, intenta con sus organizaciones
+            for (partyId in candidatos) {
+                val orgId = getOrganisationId(partyId, apiKey)
+                if (orgId != null) {
+                    val hasOpp = hasOpportunity(orgId, apiKey)
+                    android.util.Log.d("CAPSULE_WORKER", "🏢 orgId $orgId tiene oportunidad: $hasOpp")
+                    if (hasOpp) return partyId // retorna la persona, no la org
+                }
+            }
+
+            // Si nada funciona, retorna el primero
+            candidatos.firstOrNull()
+        } catch (e: Exception) {
+            android.util.Log.e("CAPSULE_WORKER", "❌ findContactByPhone: ${e.message}")
+            null
         }
-        return null
     }
 
-    private fun findManualCallOpportunity(partyId: Int, apiKey: String): Int? {
-        val url = URL("$CAPSULE_BASE/parties/$partyId/opportunities")
-        val conn = url.openConnection() as HttpURLConnection
-        conn.setRequestProperty("Authorization", "Bearer $apiKey")
-        conn.setRequestProperty("Accept", "application/json")
+    private fun hasOpportunity(partyId: Int, apiKey: String): Boolean {
+        return try {
+            val url = URL("$CAPSULE_BASE/parties/$partyId/opportunities")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.connectTimeout = 10000
+            conn.readTimeout = 10000
+            conn.setRequestProperty("Authorization", "Bearer $apiKey")
+            conn.setRequestProperty("Accept", "application/json")
+            if (conn.responseCode != 200) return false
+            val body = conn.inputStream.bufferedReader().readText()
+            JSONObject(body).getJSONArray("opportunities").length() > 0
+        } catch (e: Exception) { false }
+    }
 
-        if (conn.responseCode != 200) return null
+    private fun getOrganisationId(personPartyId: Int, apiKey: String): Int? {
+        return try {
+            val url = URL("$CAPSULE_BASE/parties/$personPartyId?embed=organisation")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.connectTimeout = 15000
+            conn.readTimeout = 15000
+            conn.setRequestProperty("Authorization", "Bearer $apiKey")
+            conn.setRequestProperty("Accept", "application/json")
 
-        val body = conn.inputStream.bufferedReader().readText()
-        val opps = JSONObject(body).getJSONArray("opportunities")
-        if (opps.length() == 0) return null
-        return opps.getJSONObject(0).getInt("id")
+            if (conn.responseCode != 200) return null
+
+            val body = conn.inputStream.bufferedReader().readText()
+            val party = JSONObject(body).optJSONObject("party") ?: return null
+            val org = party.optJSONObject("organisation") ?: return null
+            org.optInt("id", -1).takeIf { it != -1 }
+        } catch (e: Exception) {
+            android.util.Log.e("CAPSULE_WORKER", "❌ getOrganisationId: ${e.message}")
+            null
+        }
+    }
+
+    private fun findManualCallOpportunity(partyId: Int, phoneNumber: String, apiKey: String): Int? {
+        return try {
+            val url = URL("$CAPSULE_BASE/parties/$partyId/opportunities")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.connectTimeout = 15000
+            conn.readTimeout = 15000
+            conn.setRequestProperty("Authorization", "Bearer $apiKey")
+            conn.setRequestProperty("Accept", "application/json")
+
+            if (conn.responseCode != 200) {
+                android.util.Log.d("CAPSULE_WORKER", "❌ Oportunidades status: ${conn.responseCode}")
+                return null
+            }
+
+            val body = conn.inputStream.bufferedReader().readText()
+            val opps = JSONObject(body).getJSONArray("opportunities")
+            android.util.Log.d("CAPSULE_WORKER", "📋 Oportunidades para $partyId: ${opps.length()}")
+
+            if (opps.length() == 0) {
+                // Intenta buscar por organización
+                android.util.Log.d("CAPSULE_WORKER", "⚠️ Sin oportunidades directas, intentando org...")
+                return null
+            }
+
+            for (i in 0 until opps.length()) {
+                val opp = opps.getJSONObject(i)
+                android.util.Log.d("CAPSULE_WORKER", "   - id:${opp.getInt("id")} name:${opp.optString("name")}")
+            }
+
+            opps.getJSONObject(0).getInt("id")
+        } catch (e: Exception) {
+            android.util.Log.e("CAPSULE_WORKER", "❌ findManualCallOpportunity: ${e.message}")
+            null
+        }
     }
 
     private fun addCallToOpportunity(
@@ -169,31 +284,45 @@ class OutgoingCallSyncWorker(
         estado: String,
         apiKey: String
     ): Boolean {
-        val durationText = if (duracion > 0)
-            "${duracion / 60}m ${duracion % 60}s"
-        else "No respondida"
+        return try {
+            val durationText = if (duracion > 0)
+                "${duracion / 60}m ${duracion % 60}s"
+            else "No respondida"
 
-        val payload = JSONObject().apply {
-            put("entry", JSONObject().apply {
-                put("type", "note")
-                put("content", " Llamada saliente\n$phoneNumber\n $fecha   $hora\n Duración: $durationText\n Estado: $estado")
-                put("opportunity", JSONObject().apply { put("id", opportunityId) })
-            })
+            val payload = JSONObject().apply {
+                put("entry", JSONObject().apply {
+                    put("type", "note")
+                    put(
+                        "content",
+                        " Llamada saliente\n" +
+                                "$phoneNumber\n" +
+                                " $fecha   $hora\n" +
+                                " Duración: $durationText\n" +
+                                "Estado: $estado"
+                    )
+                    put("opportunity", JSONObject().apply { put("id", opportunityId) })
+                })
+            }
+
+            val url = URL("$CAPSULE_BASE/entries")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.doOutput = true
+            conn.connectTimeout = 15000
+            conn.readTimeout = 15000
+            conn.setRequestProperty("Authorization", "Bearer $apiKey")
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("Accept", "application/json")
+
+            OutputStreamWriter(conn.outputStream).use { it.write(payload.toString()) }
+            val code = conn.responseCode
+            android.util.Log.d("CAPSULE_WORKER", "📝 Nota → $code")
+            code in 200..299
+        } catch (e: Exception) {
+            android.util.Log.e("CAPSULE_WORKER", "❌ addCallToOpportunity: ${e.message}")
+            false
         }
-
-        val url = URL("$CAPSULE_BASE/entries")
-        val conn = url.openConnection() as HttpURLConnection
-        conn.requestMethod = "POST"
-        conn.doOutput = true
-        conn.setRequestProperty("Authorization", "Bearer $apiKey")
-        conn.setRequestProperty("Content-Type", "application/json")
-        conn.setRequestProperty("Accept", "application/json")
-
-        OutputStreamWriter(conn.outputStream).use { it.write(payload.toString()) }
-        return conn.responseCode in 200..299
     }
-
-    // ── Los métodos de abajo son los que ya tenías ──
 
     private fun hasRequiredPermissions(): Boolean {
         return ContextCompat.checkSelfPermission(
@@ -232,7 +361,6 @@ class OutgoingCallSyncWorker(
             ON llamadas_salientes(timestamp, numero)
         """.trimIndent())
 
-        // Migración: agrega columna sincronizado si no existe
         try {
             db.execSQL("ALTER TABLE llamadas_salientes ADD COLUMN sincronizado INTEGER DEFAULT 0")
         } catch (_: Exception) {}
@@ -256,10 +384,16 @@ class OutgoingCallSyncWorker(
     ) {
         val cursor = applicationContext.contentResolver.query(
             CallLog.Calls.CONTENT_URI,
-            arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.CACHED_NAME,
-                CallLog.Calls.DATE, CallLog.Calls.DURATION, CallLog.Calls.TYPE),
+            arrayOf(
+                CallLog.Calls.NUMBER, CallLog.Calls.CACHED_NAME,
+                CallLog.Calls.DATE, CallLog.Calls.DURATION, CallLog.Calls.TYPE
+            ),
             "${CallLog.Calls.TYPE} = ? AND ${CallLog.Calls.DATE} >= ? AND ${CallLog.Calls.DATE} <= ?",
-            arrayOf(CallLog.Calls.OUTGOING_TYPE.toString(), fromTimestamp.toString(), toTimestamp.toString()),
+            arrayOf(
+                CallLog.Calls.OUTGOING_TYPE.toString(),
+                fromTimestamp.toString(),
+                toTimestamp.toString()
+            ),
             "${CallLog.Calls.DATE} DESC"
         ) ?: return
 

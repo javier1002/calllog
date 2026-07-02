@@ -14,7 +14,7 @@ import '../widgets/action_bottom_sheet.dart';
 import '../widgets/confirm_action_dialog.dart';
 import '../widgets/empty_state.dart';
 import '../widgets/top_search_header.dart';
-import '../../services/call_sync_service.dart'; // ← Agregar
+import '../../services/call_sync_service.dart';
 
 class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
@@ -24,14 +24,15 @@ class HistoryScreen extends StatefulWidget {
 }
 
 class _HistoryScreenState extends State<HistoryScreen> {
+  static const _channel = MethodChannel('registro_llamadas/call_log');
+
   final CallsRepository _callsRepository = CallsRepository();
   final ExclusionsRepository _exclusionsRepository = ExclusionsRepository();
   final CallSyncRepository _callSyncRepository = CallSyncRepository();
   final TextEditingController _searchController = TextEditingController();
   final Debouncer _debouncer = Debouncer();
 
-  bool _syncingToCapsule = false; // ← Agregar
-
+  bool _syncingToCapsule = false;
   List<OutgoingCall> _calls = const [];
   bool _loading = true;
 
@@ -40,6 +41,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
     super.initState();
     _searchController.addListener(_onSearchChanged);
     _loadCalls();
+    _checkLastSyncResult(); // ← lee el resultado del broker al abrir la app
   }
 
   @override
@@ -48,6 +50,27 @@ class _HistoryScreenState extends State<HistoryScreen> {
     _searchController.dispose();
     _debouncer.dispose();
     super.dispose();
+  }
+
+  /// Lee el resultado del último sync automático del worker y lo muestra
+  Future<void> _checkLastSyncResult() async {
+    try {
+      final msg = await _channel.invokeMethod<String>('getLastSyncResult');
+      if (msg != null && msg.isNotEmpty && mounted) {
+        await Future.delayed(const Duration(milliseconds: 800));
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(msg),
+            duration: const Duration(seconds: 6),
+            backgroundColor: AppTheme.positive,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        // Recarga la lista para mostrar llamadas actualizadas
+        await _loadCalls();
+      }
+    } catch (_) {}
   }
 
   void _onSearchChanged() {
@@ -70,7 +93,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
       case 'sync_calls':
         await _syncOutgoingCalls();
         break;
-      case 'sync_capsule': // ← Agregar
+      case 'sync_capsule':
         await _syncCallsToCapsule();
         break;
       case 'refresh':
@@ -84,12 +107,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
   Future<void> _syncOutgoingCalls() async {
     _showSnackBar('Sincronizando llamadas salientes...');
-
     try {
       final result = await _callSyncRepository.syncTodayOutgoingCalls();
-
       await _loadCalls();
-
       _showSnackBar(
         'Leídas: ${result.totalRead}. '
         'Guardadas: ${result.inserted}. '
@@ -97,39 +117,28 @@ class _HistoryScreenState extends State<HistoryScreen> {
         'Duplicadas: ${result.skippedDuplicated}.',
       );
     } on PlatformException catch (error) {
-      _showSnackBar(
-        error.message ?? 'No se pudo leer el registro de llamadas.',
-      );
+      _showSnackBar(error.message ?? 'No se pudo leer el registro de llamadas.');
     } catch (error) {
       _showSnackBar(error.toString());
     }
   }
 
-  /// ✅ NUEVO: Sincronizar a Capsule CRM
   Future<void> _syncCallsToCapsule() async {
     if (_syncingToCapsule) return;
-
     setState(() => _syncingToCapsule = true);
-
     try {
       final result = await CallSyncService.syncCalls();
-
       if (!mounted) return;
-
       _showSnackBar(
         '✅ Sincronización completada: '
         'Creadas ${result.creadas}, Omitidas ${result.omitidas}',
       );
-
-      // Recargar la lista
       await _loadCalls();
     } catch (error) {
       if (!mounted) return;
       _showSnackBar('❌ Error sincronizando: $error');
     } finally {
-      if (mounted) {
-        setState(() => _syncingToCapsule = false);
-      }
+      if (mounted) setState(() => _syncingToCapsule = false);
     }
   }
 
@@ -143,7 +152,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
         confirmText: 'Eliminar',
       ),
     );
-
     if (confirmed != true) return;
     await _callsRepository.clear();
     await _loadCalls();
@@ -191,7 +199,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
   Future<void> _confirmDeleteCall(OutgoingCall call) async {
     final id = call.id;
     if (id == null) return;
-
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => const ConfirmActionDialog(
@@ -201,7 +208,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
         confirmText: 'Eliminar',
       ),
     );
-
     if (confirmed != true) return;
     await _callsRepository.deleteById(id);
     await _loadCalls();
@@ -214,12 +220,10 @@ class _HistoryScreenState extends State<HistoryScreen> {
       _showSnackBar('El número no es válido.');
       return;
     }
-
     final exists = await _exclusionsRepository.exists(
       numero: numero,
       tipo: ExclusionType.exacto,
     );
-
     if (!mounted) return;
     if (exists) {
       await showDialog<void>(
@@ -231,7 +235,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
       );
       return;
     }
-
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => ConfirmActionDialog(
@@ -242,7 +245,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
         isDestructive: false,
       ),
     );
-
     if (confirmed != true) return;
     await _exclusionsRepository.insert(
       numero: numero,
@@ -275,8 +277,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
               child: Text('Sincronizar llamadas del teléfono'),
             ),
             const PopupMenuItem(
-              value: 'sync_capsule', // ← Agregar
-              child: Text('📤 Sincronizar con Capsule'),
+              value: 'sync_capsule',
+              child: Text(' Sincronizar con Capsule'),
             ),
             const PopupMenuItem(
               value: 'refresh',
@@ -328,7 +330,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
                               );
                             },
                           ),
-                          // ← Agregar indicador de sincronización
                           if (_syncingToCapsule)
                             Positioned(
                               bottom: 20,
@@ -341,7 +342,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                                     vertical: 12,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: Colors.blue,
+                                    color: AppTheme.primary,
                                     borderRadius: BorderRadius.circular(20),
                                   ),
                                   child: const Row(
@@ -352,10 +353,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                                         height: 20,
                                         child: CircularProgressIndicator(
                                           strokeWidth: 2,
-                                          valueColor:
-                                              AlwaysStoppedAnimation<Color>(
-                                                Colors.white,
-                                              ),
+                                          valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                                         ),
                                       ),
                                       SizedBox(width: 12),
@@ -381,10 +379,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
 }
 
 class _CallCard extends StatelessWidget {
-  const _CallCard({
-    required this.call,
-    required this.onTap,
-  });
+  const _CallCard({required this.call, required this.onTap});
 
   final OutgoingCall call;
   final VoidCallback onTap;
@@ -477,20 +472,19 @@ class _CallCard extends StatelessWidget {
 
 class _StatusVisuals {
   const _StatusVisuals(this.icon, this.color);
-
   final IconData icon;
   final Color color;
 }
 
 _StatusVisuals _statusVisuals(String status) {
   final normalized = status.toLowerCase();
-  if (normalized.contains('respond')) {
+  if (normalized.contains('respond') && !normalized.contains('no respond')) {
     return const _StatusVisuals(Icons.arrow_upward_rounded, AppTheme.positive);
   }
-  if (normalized.contains('rechaz') ||
+  if (normalized.contains('no respond') ||
+      normalized.contains('rechaz') ||
       normalized.contains('bloque') ||
       normalized.contains('ocup') ||
-      normalized.contains('no respond') ||
       normalized.contains('perdid')) {
     return const _StatusVisuals(Icons.arrow_downward_rounded, AppTheme.danger);
   }

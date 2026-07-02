@@ -15,7 +15,7 @@ Future<void> _saveApiKeyForWorker() async {
   const channel = MethodChannel('registro_llamadas/call_log');
   try {
     await channel.invokeMethod('saveApiKey', {
-      'key': dotenv.env['CAPSULE_API_KEY'] ?? '',
+      'key': 'ujfj8+XVhZZHA7FHlFqK+Mplc0HO8mEbXHYp59C177FbXS9fIt70x40jYoLu/4Y+',
     });
   } catch (_) {}
 }

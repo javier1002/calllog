@@ -5,7 +5,7 @@ class AppDatabase {
   AppDatabase._();
   static final AppDatabase instance = AppDatabase._();
   static const String databaseName = 'registro_llamadas_salientes.db';
-  static const int databaseVersion = 2; // ← subir de 1 a 2
+  static const int databaseVersion = 2;
 
   Database? _database;
 
@@ -18,7 +18,7 @@ class AppDatabase {
       fullPath,
       version: databaseVersion,
       onCreate: _onCreate,
-      onUpgrade: _onUpgrade, // ← agregar
+      onUpgrade: _onUpgrade,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
       },
@@ -62,12 +62,13 @@ class AppDatabase {
     ''');
   }
 
-  // ← agregar este método
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
-      await db.execute(
-        'ALTER TABLE llamadas_salientes ADD COLUMN sincronizado INTEGER DEFAULT 0',
-      );
+      try {
+        await db.execute(
+          'ALTER TABLE llamadas_salientes ADD COLUMN sincronizado INTEGER DEFAULT 0',
+        );
+      } catch (_) {}
     }
   }
 
