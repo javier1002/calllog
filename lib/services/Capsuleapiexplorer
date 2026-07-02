@@ -3,7 +3,7 @@ import 'package:http/http.dart' as http;
 
 class CapsuleAPIExplorer {
   static const _base = 'https://api.capsulecrm.com/api/v2';
-  static const _apiKey = 'svXuia0+HUmBBH/MTF1ghcnVBtQ/JML72vBlpHeBgmRMdZsEFU21FROWmXGoc/HU';
+  static const _apiKey = 'ujfj8+XVhZZHA7FHlFqK+Mplc0HO8mEbXHYp59C177FbXS9fIt70x40jYoLu/4Y+';
 
   static Map<String, String> get _headers => {
     'Authorization': 'Bearer $_apiKey',

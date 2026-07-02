@@ -28,7 +28,7 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        // ← PRUEBA: ejecuta el worker inmediatamente al abrir la app
+        // Corre el worker inmediatamente para pruebas — quita esto en producción
         testWorkerNow()
 
         MethodChannel(
@@ -42,8 +42,16 @@ class MainActivity : FlutterActivity() {
                     val key = call.argument<String>("key") ?: ""
                     val prefs = getSharedPreferences("capsule_prefs", Context.MODE_PRIVATE)
                     prefs.edit().putString("api_key", key).apply()
-                    android.util.Log.d("CAPSULE_TEST", "✅ API key guardada: ${key.take(10)}...")
                     result.success(true)
+                }
+
+                "getLastSyncResult" -> {
+                    val prefs = getSharedPreferences("capsule_prefs", Context.MODE_PRIVATE)
+                    val msg = prefs.getString("last_sync_result", null)
+                    if (msg != null) {
+                        prefs.edit().remove("last_sync_result").apply()
+                    }
+                    result.success(msg)
                 }
 
                 "getOutgoingCalls" -> {
@@ -78,7 +86,6 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    // ── PRUEBA: ejecuta el worker una sola vez ahora mismo ──
     private fun testWorkerNow() {
         android.util.Log.d("CAPSULE_TEST", "🔵 Encolando worker de prueba...")
         val request = OneTimeWorkRequestBuilder<OutgoingCallSyncWorker>()
@@ -186,16 +193,18 @@ class MainActivity : FlutterActivity() {
 
     private fun scheduleDailyCallSync() {
         val initialDelay = calculateInitialDelayMillis(
-            targetHour = 23,
+            targetHour = 11,
             targetMinute = 59
         )
         val request = PeriodicWorkRequestBuilder<OutgoingCallSyncWorker>(1, TimeUnit.DAYS)
             .setInitialDelay(initialDelay, TimeUnit.MILLISECONDS)
             .addTag(OutgoingCallSyncWorker.WORK_NAME)
             .build()
+
+        // REPLACE: siempre toma el horario actualizado
         WorkManager.getInstance(this).enqueueUniquePeriodicWork(
             OutgoingCallSyncWorker.WORK_NAME,
-            ExistingPeriodicWorkPolicy.KEEP,
+            ExistingPeriodicWorkPolicy.REPLACE,
             request
         )
     }
